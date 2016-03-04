@@ -706,6 +706,12 @@ sub addnode
                 print $omshell "open\n";
             print $omshell "remove\n";
             print $omshell "close\n";
+            print $omshell "new host\n";
+            print $omshell
+                "set name = \"$hostname\"\n";    #Find and destroy conflict name
+                print $omshell "open\n";
+            print $omshell "remove\n";
+            print $omshell "close\n";
             if ($ip and not $cleaned{$ip} and $ip ne 'DENIED') {
                 print $omshell "new host\n";
                 print $omshell "set ip-address = $ip\n";   #find and destroy ip conflict

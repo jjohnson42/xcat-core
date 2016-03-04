@@ -462,6 +462,7 @@ sub addnode
     my $ient;
     my $ntent;
     my $tftpserver;
+    my %cleaned;
     if ($chainents and $chainents->{$node}) {
         $chainent = $chainents->{$node}->[0];
     }
@@ -697,18 +698,21 @@ sub addnode
             }
 
             #syslog("local4|err", "Setting $node ($hname|$ip) to " . $mac);
+	    my $dhcpname = "$hostname-$mac";
+	    $dhcpname =~ s/://g;
             print $omshell "new host\n";
             print $omshell
-                "set name = \"$hostname\"\n";    #Find and destroy conflict name
+                "set name = \"$dhcpname\"\n";    #Find and destroy conflict name
                 print $omshell "open\n";
             print $omshell "remove\n";
             print $omshell "close\n";
-            if ($ip and $ip ne 'DENIED') {
+            if ($ip and not $cleaned{$ip} and $ip ne 'DENIED') {
                 print $omshell "new host\n";
                 print $omshell "set ip-address = $ip\n";   #find and destroy ip conflict
                     print $omshell "open\n";
                 print $omshell "remove\n";
                 print $omshell "close\n";
+	        $cleaned{$ip} = 1;
             }
             print $omshell "new host\n";
             print $omshell "set hardware-address = " . $mac
@@ -717,7 +721,7 @@ sub addnode
             print $omshell "remove\n";
             print $omshell "close\n";
             print $omshell "new host\n";
-            print $omshell "set name = \"$hostname\"\n";
+            print $omshell "set name = \"$dhcpname\"\n";
             print $omshell "set hardware-address = " . $mac . "\n";
             print $omshell "set hardware-type = $hardwaretype\n";
 

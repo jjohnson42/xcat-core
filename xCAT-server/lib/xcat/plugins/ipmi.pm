@@ -14,6 +14,7 @@ BEGIN
 use lib "$::XCATROOT/lib/perl";
 use strict;
 use warnings "all";
+use JSON;
 use xCAT::GlobalDef;
 use xCAT_monitoring::monitorctrl;
 use xCAT::SPD qw/decode_spd/;
@@ -1384,6 +1385,32 @@ sub check_rsp_errors { #TODO: pass in command-specfic error code translation tab
     }
     return 0;
 }
+sub get_useragent_imm2 {
+       my $sessdata = shift;
+    $ENV{PERL_LWP_SSL_VERIFY_HOSTNAME} = 0; #TODO: for standalone IMMs, automate CSR retrieval and granting at setup itme
+    my $browser = LWP::UserAgent->new();
+       my $host = $sessdata->{ipmisession}->{bmc};
+    my $hostname;
+    ($hostname, $host) = xCAT::NetworkUtils->gethostnameandip($host);
+        my $ip6mode=0;
+       if ($host =~ /:/) { $ip6mode=1; $host = "[".$host."]"; }
+    my $message = "user=".$sessdata->{ipmisession}->{userid}."&password=".$sessdata->{ipmisession}->{password}."&SessionTimeout=1200";
+    $browser->cookie_jar({});
+    my $httpport=443;
+    my $baseurl = "https://$host/";
+    my $response = $browser->request(POST $baseurl."data/login",Referer=>"https://$host/designs/imm/index.php",'Content-Type'=>"application/x-www-form-urlencoded",Content=>$message);
+    if ($response->code == 500) {
+       $httpport=80;
+       $baseurl = "http://$host/";
+       $response = $browser->request(POST $baseurl."data/login",Referer=>"http://$host/designs/imm/index.php",'Content-Type'=>"application/x-www-form-urlencoded",Content=>$message);
+    }
+    my $sessionid;
+    unless ($response->content =~ /\"ok\"?(.*)/ and $response->content =~ /\"authResult\":\"0\"/) {
+        return undef;
+    }
+    return $browser, $baseurl;
+}
+
 sub getrvidparms_imm2 {
 	my $rsp = shift;
 	my $sessdata = shift;
@@ -2395,6 +2422,7 @@ sub add_textual_fru {
     my $subcategory = shift;
     my $types = shift;
     my $sessdata = shift;
+    $description =~ s/^ //;
     my %args = @_;
 
     if ($parsedfru->{$category} and $parsedfru->{$category}->{$subcategory}) {
@@ -2510,6 +2538,9 @@ sub got_bmc_fw_info {
             my $prefix = pack("C*",@returnd[0..3]);
             if ($prefix =~ /yuoo/i or $prefix =~ /1aoo/i or $prefix =~ /tcoo/i) { #we have an imm
                 $isanimm=1;
+                if ($prefix =~ /tcoo/i) {
+                    $sessdata->{isanimm2} = 1;
+                }
             }
 			$mprom = sprintf("%d.%s (%s)",$fw_rev1,decodebcd(\@a),getascii(@returnd));
 	} else { #either not a callback or IBM call failed
@@ -2524,11 +2555,57 @@ sub got_bmc_fw_info {
     $sessdata->{isanimm}=$isanimm;
     if ($isanimm) {
 	#get_imm_property(property=>"/v2/bios/build_id",callback=>\&got_bios_buildid,sessdata=>$sessdata);
-	check_for_ite(sessdata=>$sessdata);
+	if ($sessdata->{isanimm2}) {
+            get_adapter_data(sessdata=>$sessdata);
+        } else {
+	    check_for_ite(sessdata=>$sessdata);
+        }
     } else {
         initfru_with_mprom($sessdata);
     }
 }
+sub get_adapter_data {
+    my %args = @_;
+    my $sessdata = $args{sessdata};
+    my $baseurl;
+    my $browser;
+    ($browser, $baseurl) = get_useragent_imm2($sessdata);
+    unless ($browser) {
+         check_for_ite(sessdata=>$sessdata);
+         return;
+    }
+    my $response = $browser->request(GET $baseurl."/designs/imm/dataproviders/imm_adapters.php");
+    my $adapter_data = JSON::from_json($response->content);
+    foreach my $adapter (@{$adapter_data->{items}}) {
+         my $myfruhash = {product=>{}};
+         $sessdata->{got_macs} = 1;  # let code know that we got macs already
+         my $devlabel = '';
+         if ($adapter->{'adapter.connectorLabel'} eq 'ML2') {
+             $devlabel = 'ML2';
+         } elsif ($adapter->{'adapter.connectorLabel'} ne 'Onboard') {
+             $devlabel = 'Slot ' . $adapter->{'adapter.slotNo'};
+         }
+         foreach my $fun (@{$adapter->{'adapter.functions'}}) {
+             foreach my $port (@{$fun->{'network.pPorts'}}) {
+                 foreach my $lport (@{$port->{'logicalPorts'}}) {
+                    if ($lport->{'workProtocol'} eq 'Ethernet') {
+                        my $mac = $lport->{networkAddr};
+                        $mac =~ s/(..)/$1:/g;
+                        $mac =~ s/:$//;
+                        push @{$myfruhash->{product}->{macaddrs}}, lc($mac);
+                    }
+                 }
+             }
+         }
+         if (ref $myfruhash->{product}->{macaddrs}) {
+             add_textual_frus($myfruhash, $devlabel, '', 'product', undef, $sessdata);
+         }
+         $myfruhash = {product=>{}};
+         
+    }
+    check_for_ite(sessdata=>$sessdata);
+}
+
 sub got_bios_buildid {
    my %res = @_;
    my $sessdata = $res{sessdata};
@@ -2790,7 +2867,10 @@ sub process_currfruid {
 sub initfru_zero {
     my $sessdata = shift;
     my $fruhash = shift;
-    my $frudex=0;
+    my $frudex = 0;
+    if ($sessdata->{frudex}) {
+       $frudex = $sessdata->{frudex}; 
+    }
     my $fru;
     if (defined $fruhash->{product}->{manufacturer}->{value}) {
 	    $fru = FRU->new();
@@ -3488,7 +3568,9 @@ sub got_vpd_addresses {
 		}
 		if ($sessdata->{curraddrtype} eq "mac") {
 			$macstring =~ s/:..:..$//;
+            unless ($sessdata->{got_macs}) {
 			push @{$sessdata->{currmacs}},$macstring;
+            }
 		} elsif ($sessdata->{curraddrtype} eq "wwn") {
 			push @{$sessdata->{currwwns}},$macstring;
 		}
@@ -3782,7 +3864,7 @@ sub parseboard {
 	    unless ($macprefix) {
 	    	$macprefix = substr($macstring, 0, 8);
 	    }
-            if ($macstring !~ /00:00:00:00:00:00/ and $macstring =~/^$macprefix/) { 
+            if (not $global_sessdata->{got_macs} and $macstring !~ /00:00:00:00:00:00/ and $macstring =~/^$macprefix/) { 
                 push @{$boardinf{macaddrs}},$macstring;
             }
         }
